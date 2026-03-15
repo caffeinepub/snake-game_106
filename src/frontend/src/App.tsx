@@ -1,263 +1,450 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// ── Types ──────────────────────────────────────────────────────────────────
-type Point = { x: number; y: number };
-type Direction = "UP" | "DOWN" | "LEFT" | "RIGHT";
+// ── Constants ────────────────────────────────────────────────────────────────
+const CANVAS_W = 360;
+const CANVAS_H = 600;
+const ROAD_MARGIN = 28;
+const ROAD_W = CANVAS_W - 2 * ROAD_MARGIN;
+const LANE_W = ROAD_W / 3;
+const LANE_CENTERS: number[] = [0, 1, 2].map(
+  (i) => ROAD_MARGIN + LANE_W * i + LANE_W / 2,
+);
+
+const CAR_W = 42;
+const CAR_H = 68;
+const PLAYER_Y = CANVAS_H - 120;
+const BASE_SPEED = 3.2;
+const DASH_LENGTH = 28;
+const DASH_GAP = 18;
+const DASH_TOTAL = DASH_LENGTH + DASH_GAP;
+
+const ENEMY_COLORS = ["#ff3d3d", "#ff7a1f", "#ff5a5a", "#e84545"];
+
 type GameStatus = "idle" | "playing" | "over";
 
-const GRID = 20;
-const CELL = 26; // px
-const BASE_INTERVAL = 200;
-const MIN_INTERVAL = 80;
-const SPEED_REDUCTION = 4;
-
-function getInterval(score: number): number {
-  return Math.max(MIN_INTERVAL, BASE_INTERVAL - score * SPEED_REDUCTION);
+interface EnemyCar {
+  lane: number;
+  y: number;
+  color: string;
 }
 
-function randomPoint(snake: Point[]): Point {
-  let p: Point;
-  do {
-    p = {
-      x: Math.floor(Math.random() * GRID),
-      y: Math.floor(Math.random() * GRID),
-    };
-  } while (snake.some((s) => s.x === p.x && s.y === p.y));
-  return p;
+function getSpeed(score: number): number {
+  return BASE_SPEED * (1 + Math.floor(score / 5) * 0.1);
 }
 
-const INITIAL_SNAKE: Point[] = [
-  { x: 11, y: 10 },
-  { x: 10, y: 10 },
-  { x: 9, y: 10 },
-];
-const INITIAL_DIR: Direction = "RIGHT";
-const INITIAL_FOOD: Point = { x: 15, y: 10 };
-
-const OPPOSITE: Record<Direction, Direction> = {
-  UP: "DOWN",
-  DOWN: "UP",
-  LEFT: "RIGHT",
-  RIGHT: "LEFT",
-};
-
-const KEY_MAP: Record<string, Direction> = {
-  ArrowUp: "UP",
-  ArrowDown: "DOWN",
-  ArrowLeft: "LEFT",
-  ArrowRight: "RIGHT",
-};
-
-function speedLabel(score: number): string {
-  if (score < 5) return "SLOW";
-  if (score < 12) return "MEDIUM";
-  if (score < 22) return "FAST";
-  if (score < 35) return "TURBO";
-  return "MAX";
+function randomEnemyColor(): string {
+  return ENEMY_COLORS[Math.floor(Math.random() * ENEMY_COLORS.length)];
 }
 
-// ── Main Component ─────────────────────────────────────────────────────────
+function initEnemies(): EnemyCar[] {
+  return [0, 1, 2].map((i) => ({
+    lane: i,
+    y: -(CAR_H + 80 + i * 180),
+    color: randomEnemyColor(),
+  }));
+}
+
+// ── Draw Helpers (literal colors — cannot use CSS vars in Canvas API) ────────
+
+function drawRoad(ctx: CanvasRenderingContext2D, offset: number) {
+  ctx.fillStyle = "#0b0b12";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.fillStyle = "#0d1a0e";
+  ctx.fillRect(0, 0, ROAD_MARGIN, CANVAS_H);
+  ctx.fillRect(CANVAS_W - ROAD_MARGIN, 0, ROAD_MARGIN, CANVAS_H);
+
+  const grad = ctx.createLinearGradient(
+    ROAD_MARGIN,
+    0,
+    CANVAS_W - ROAD_MARGIN,
+    0,
+  );
+  grad.addColorStop(0, "#16161f");
+  grad.addColorStop(0.5, "#1c1c28");
+  grad.addColorStop(1, "#16161f");
+  ctx.fillStyle = grad;
+  ctx.fillRect(ROAD_MARGIN, 0, ROAD_W, CANVAS_H);
+
+  ctx.fillStyle = "rgba(255,255,255,0.012)";
+  ctx.fillRect(ROAD_MARGIN + ROAD_W / 2 - 6, 0, 12, CANVAS_H);
+
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.lineWidth = 2.5;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(ROAD_MARGIN, 0);
+  ctx.lineTo(ROAD_MARGIN, CANVAS_H);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(CANVAS_W - ROAD_MARGIN, 0);
+  ctx.lineTo(CANVAS_W - ROAD_MARGIN, CANVAS_H);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(255,255,255,0.28)";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([DASH_LENGTH, DASH_GAP]);
+  ctx.lineDashOffset = -(offset % DASH_TOTAL);
+  for (let lane = 1; lane <= 2; lane++) {
+    const x = ROAD_MARGIN + LANE_W * lane;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, CANVAS_H);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.lineDashOffset = 0;
+
+  const leftGlow = ctx.createLinearGradient(0, 0, ROAD_MARGIN + 20, 0);
+  leftGlow.addColorStop(0, "rgba(0,212,255,0.0)");
+  leftGlow.addColorStop(1, "rgba(0,212,255,0.04)");
+  ctx.fillStyle = leftGlow;
+  ctx.fillRect(0, 0, ROAD_MARGIN + 20, CANVAS_H);
+
+  const rightGlow = ctx.createLinearGradient(
+    CANVAS_W - ROAD_MARGIN - 20,
+    0,
+    CANVAS_W,
+    0,
+  );
+  rightGlow.addColorStop(0, "rgba(0,212,255,0.04)");
+  rightGlow.addColorStop(1, "rgba(0,212,255,0.0)");
+  ctx.fillStyle = rightGlow;
+  ctx.fillRect(CANVAS_W - ROAD_MARGIN - 20, 0, ROAD_MARGIN + 20, CANVAS_H);
+}
+
+function drawCar(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  bodyColor: string,
+  glassColor: string,
+  glowColor: string | null,
+) {
+  const x = cx - CAR_W / 2;
+  const y = cy;
+
+  if (glowColor) {
+    ctx.shadowColor = glowColor;
+    ctx.shadowBlur = 22;
+  }
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.roundRect(x, y, CAR_W, CAR_H, 6);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = glassColor;
+  ctx.beginPath();
+  ctx.roundRect(x + 7, y + 6, CAR_W - 14, 19, 3);
+  ctx.fill();
+
+  ctx.fillStyle = glassColor;
+  ctx.beginPath();
+  ctx.roundRect(x + 7, y + CAR_H - 23, CAR_W - 14, 15, 3);
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.fillRect(x + CAR_W / 2 - 3, y + 2, 6, CAR_H - 4);
+
+  ctx.fillStyle = "#111118";
+  const ww = 6;
+  const wh = 14;
+  ctx.fillRect(x - ww + 1, y + 10, ww, wh);
+  ctx.fillRect(x + CAR_W - 1, y + 10, ww, wh);
+  ctx.fillRect(x - ww + 1, y + CAR_H - 24, ww, wh);
+  ctx.fillRect(x + CAR_W - 1, y + CAR_H - 24, ww, wh);
+
+  ctx.fillStyle = "rgba(255,255,255,0.25)";
+  ctx.fillRect(x - ww + 2, y + 13, 2, 4);
+  ctx.fillRect(x + CAR_W, y + 13, 2, 4);
+  ctx.fillRect(x - ww + 2, y + CAR_H - 21, 2, 4);
+  ctx.fillRect(x + CAR_W, y + CAR_H - 21, 2, 4);
+
+  if (glowColor !== null) {
+    ctx.fillStyle = "rgba(220,240,255,0.95)";
+    ctx.beginPath();
+    ctx.roundRect(x + 5, y + CAR_H - 8, 10, 6, 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(x + CAR_W - 15, y + CAR_H - 8, 10, 6, 2);
+    ctx.fill();
+  } else {
+    ctx.fillStyle = "rgba(255,60,60,0.9)";
+    ctx.beginPath();
+    ctx.roundRect(x + 5, y + 3, 9, 5, 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(x + CAR_W - 14, y + 3, 9, 5, 2);
+    ctx.fill();
+  }
+}
+
+function drawSpeedLines(
+  ctx: CanvasRenderingContext2D,
+  speed: number,
+  frame: number,
+) {
+  const level = Math.min((speed - BASE_SPEED) / (BASE_SPEED * 2), 1);
+  if (level <= 0) return;
+  ctx.save();
+  ctx.strokeStyle = `rgba(0,212,255,${0.07 * level})`;
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 6; i++) {
+    const seed = (frame * 7 + i * 31) % 100;
+    const y1 = (seed * 63) % CANVAS_H;
+    const len = 20 + (seed % 50);
+    const lx = 4 + (seed % (ROAD_MARGIN - 8));
+    ctx.beginPath();
+    ctx.moveTo(lx, y1);
+    ctx.lineTo(lx, y1 + len);
+    ctx.stroke();
+    const rx = CANVAS_W - ROAD_MARGIN + 4 + (seed % (ROAD_MARGIN - 8));
+    ctx.beginPath();
+    ctx.moveTo(rx, y1);
+    ctx.lineTo(rx, y1 + len);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── Main Component ──────────────────────────────────────────────────────────
 export default function App() {
-  const [snake, setSnake] = useState<Point[]>(INITIAL_SNAKE);
-  const [food, setFood] = useState<Point>(INITIAL_FOOD);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(() => {
     try {
-      return Number.parseInt(localStorage.getItem("snake-high") ?? "0", 10);
+      return Number.parseInt(localStorage.getItem("car-race-high") ?? "0", 10);
     } catch {
       return 0;
     }
   });
-  const [status, setStatus] = useState<GameStatus>("idle");
-  const [scoreKey, setScoreKey] = useState(0);
+  const [gameStatus, setGameStatus] = useState<GameStatus>("idle");
 
-  const dirRef = useRef<Direction>(INITIAL_DIR);
-  const pendingDirRef = useRef<Direction | null>(null);
-  const snakeRef = useRef<Point[]>(INITIAL_SNAKE);
-  const foodRef = useRef<Point>(INITIAL_FOOD);
-  const scoreRef = useRef(0);
   const statusRef = useRef<GameStatus>("idle");
+  const rafRef = useRef<number>(0);
+  const frameRef = useRef(0);
+  const scoreRef = useRef(0);
+  const highScoreRef = useRef(0);
+  const playerXRef = useRef(LANE_CENTERS[1]);
+  const playerTargetXRef = useRef(LANE_CENTERS[1]);
+  const roadOffsetRef = useRef(0);
+  const enemiesRef = useRef<EnemyCar[]>([]);
 
-  snakeRef.current = snake;
-  foodRef.current = food;
-  scoreRef.current = score;
-  statusRef.current = status;
+  highScoreRef.current = highScore;
 
-  const tick = useCallback(() => {
-    if (statusRef.current !== "playing") return;
-
-    if (pendingDirRef.current) {
-      dirRef.current = pendingDirRef.current;
-      pendingDirRef.current = null;
-    }
-
-    const dir = dirRef.current;
-    const currentSnake = snakeRef.current;
-    const head = currentSnake[0];
-
-    const newHead: Point = {
-      x: head.x + (dir === "RIGHT" ? 1 : dir === "LEFT" ? -1 : 0),
-      y: head.y + (dir === "DOWN" ? 1 : dir === "UP" ? -1 : 0),
-    };
-
-    if (
-      newHead.x < 0 ||
-      newHead.x >= GRID ||
-      newHead.y < 0 ||
-      newHead.y >= GRID
-    ) {
-      endGame();
-      return;
-    }
-
-    if (currentSnake.some((s) => s.x === newHead.x && s.y === newHead.y)) {
-      endGame();
-      return;
-    }
-
-    const ateFood =
-      newHead.x === foodRef.current.x && newHead.y === foodRef.current.y;
-    const newSnake = ateFood
-      ? [newHead, ...currentSnake]
-      : [newHead, ...currentSnake.slice(0, -1)];
-
-    if (ateFood) {
-      const newScore = scoreRef.current + 1;
-      setScore(newScore);
-      setScoreKey((k) => k + 1);
-      setFood(randomPoint(newSnake));
-      if (newScore > highScore) {
-        setHighScore(newScore);
-        try {
-          localStorage.setItem("snake-high", String(newScore));
-        } catch {
-          /* noop */
-        }
-      }
-    }
-
-    setSnake(newSnake);
-  }, [highScore]);
-
-  function endGame() {
-    statusRef.current = "over";
-    setStatus("over");
-  }
-
-  useEffect(() => {
-    if (status !== "playing") return;
-    const id = setInterval(tick, getInterval(score));
-    return () => clearInterval(id);
-  }, [status, score, tick]);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const dir = KEY_MAP[e.key];
-      if (!dir) return;
-      e.preventDefault();
-
-      if (statusRef.current === "idle") {
-        dirRef.current = dir;
-        setStatus("playing");
-        statusRef.current = "playing";
-        return;
-      }
-
-      if (statusRef.current === "playing") {
-        if (dir !== OPPOSITE[dirRef.current]) {
-          pendingDirRef.current = dir;
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+  const startGame = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    scoreRef.current = 0;
+    frameRef.current = 0;
+    playerXRef.current = LANE_CENTERS[1];
+    playerTargetXRef.current = LANE_CENTERS[1];
+    roadOffsetRef.current = 0;
+    enemiesRef.current = initEnemies();
+    statusRef.current = "playing";
+    setScore(0);
+    setGameStatus("playing");
   }, []);
 
-  function restart() {
-    const newSnake = [...INITIAL_SNAKE];
-    const newFood = randomPoint(newSnake);
-    setSnake(newSnake);
-    setFood(newFood);
-    setScore(0);
-    dirRef.current = INITIAL_DIR;
-    pendingDirRef.current = null;
-    snakeRef.current = newSnake;
-    foodRef.current = newFood;
-    scoreRef.current = 0;
-    setStatus("playing");
-    statusRef.current = "playing";
-  }
+  const gameLoop = useCallback(() => {
+    if (statusRef.current !== "playing") return;
 
-  function handleMobileDir(dir: Direction) {
-    if (status === "idle") {
-      dirRef.current = dir;
-      setStatus("playing");
-      statusRef.current = "playing";
-      return;
-    }
-    if (status === "playing" && dir !== OPPOSITE[dirRef.current]) {
-      pendingDirRef.current = dir;
-    }
-  }
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
 
-  const snakeSet = new Map<string, number>();
-  snake.forEach((s, i) => snakeSet.set(`${s.x},${s.y}`, i));
-  const boardSize = GRID * CELL;
+    frameRef.current += 1;
+    const speed = getSpeed(scoreRef.current);
 
-  // Build grid lines arrays
-  const gridIndices = Array.from({ length: GRID + 1 }, (_, i) => i);
+    const dx = playerTargetXRef.current - playerXRef.current;
+    playerXRef.current += dx * 0.2;
 
-  // Build cells to render
-  const cells: Array<{
-    key: string;
-    col: number;
-    row: number;
-    snakeIdx: number | undefined;
-    isFood: boolean;
-  }> = [];
-  for (let row = 0; row < GRID; row++) {
-    for (let col = 0; col < GRID; col++) {
-      const key = `${col},${row}`;
-      const snakeIdx = snakeSet.get(key);
-      const isFood = food.x === col && food.y === row;
-      if (snakeIdx !== undefined || isFood) {
-        cells.push({ key, col, row, snakeIdx, isFood });
+    const minX = ROAD_MARGIN + CAR_W / 2 + 2;
+    const maxX = CANVAS_W - ROAD_MARGIN - CAR_W / 2 - 2;
+    if (playerXRef.current < minX) playerXRef.current = minX;
+    if (playerXRef.current > maxX) playerXRef.current = maxX;
+
+    roadOffsetRef.current += speed;
+
+    for (const enemy of enemiesRef.current) {
+      enemy.y += speed;
+
+      if (enemy.y > CANVAS_H + CAR_H + 20) {
+        const newScore = scoreRef.current + 1;
+        scoreRef.current = newScore;
+        setScore(newScore);
+        if (newScore > highScoreRef.current) {
+          highScoreRef.current = newScore;
+          setHighScore(newScore);
+          try {
+            localStorage.setItem("car-race-high", String(newScore));
+          } catch {
+            /* noop */
+          }
+        }
+        const occupiedLanes = enemiesRef.current
+          .filter((e) => e !== enemy && e.y > -CAR_H * 2)
+          .map((e) => e.lane);
+        const freeLanes = [0, 1, 2].filter((l) => !occupiedLanes.includes(l));
+        enemy.lane =
+          freeLanes.length > 0
+            ? freeLanes[Math.floor(Math.random() * freeLanes.length)]
+            : Math.floor(Math.random() * 3);
+        enemy.y = -(CAR_H + 60 + Math.random() * 160);
+        enemy.color = randomEnemyColor();
       }
     }
+
+    const px = playerXRef.current - CAR_W / 2;
+    const py = PLAYER_Y;
+    for (const enemy of enemiesRef.current) {
+      const ex = LANE_CENTERS[enemy.lane] - CAR_W / 2;
+      const ey = enemy.y;
+      const overlap =
+        px < ex + CAR_W - 4 &&
+        px + CAR_W - 4 > ex &&
+        py < ey + CAR_H - 4 &&
+        py + CAR_H - 4 > ey;
+      if (overlap) {
+        statusRef.current = "over";
+        setGameStatus("over");
+        return;
+      }
+    }
+
+    drawRoad(ctx, roadOffsetRef.current);
+    drawSpeedLines(ctx, speed, frameRef.current);
+    for (const enemy of enemiesRef.current) {
+      drawCar(
+        ctx,
+        LANE_CENTERS[enemy.lane],
+        enemy.y,
+        enemy.color,
+        "rgba(18,2,2,0.85)",
+        null,
+      );
+    }
+    drawCar(
+      ctx,
+      playerXRef.current,
+      PLAYER_Y,
+      "#00d4ff",
+      "rgba(0,16,28,0.85)",
+      "#00d4ff",
+    );
+
+    rafRef.current = requestAnimationFrame(gameLoop);
+  }, []);
+
+  useEffect(() => {
+    if (gameStatus === "playing") {
+      rafRef.current = requestAnimationFrame(gameLoop);
+    }
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [gameStatus, gameLoop]);
+
+  useEffect(() => {
+    if (gameStatus !== "idle") return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    drawRoad(ctx, 0);
+    drawCar(
+      ctx,
+      LANE_CENTERS[1],
+      PLAYER_Y,
+      "#00d4ff",
+      "rgba(0,16,28,0.85)",
+      "#00d4ff",
+    );
+    drawCar(ctx, LANE_CENTERS[0], 120, "#ff3d3d", "rgba(18,2,2,0.85)", null);
+    drawCar(ctx, LANE_CENTERS[2], 260, "#ff7a1f", "rgba(18,2,2,0.85)", null);
+  }, [gameStatus]);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") e.preventDefault();
+      if (
+        statusRef.current === "idle" &&
+        (e.key === "ArrowLeft" || e.key === "ArrowRight")
+      ) {
+        startGame();
+        return;
+      }
+      if (statusRef.current !== "playing") return;
+      const minX = ROAD_MARGIN + CAR_W / 2 + 2;
+      const maxX = CANVAS_W - ROAD_MARGIN - CAR_W / 2 - 2;
+      if (e.key === "ArrowLeft") {
+        playerTargetXRef.current = Math.max(
+          minX,
+          playerTargetXRef.current - LANE_W,
+        );
+      } else if (e.key === "ArrowRight") {
+        playerTargetXRef.current = Math.min(
+          maxX,
+          playerTargetXRef.current + LANE_W,
+        );
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [startGame]);
+
+  function handleTouchStart(_e: React.TouchEvent) {
+    if (statusRef.current === "idle") {
+      startGame();
+    }
   }
 
+  function handleTouchMove(e: React.TouchEvent) {
+    if (statusRef.current !== "playing") return;
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const touchX = e.touches[0].clientX - rect.left;
+    const scale = CANVAS_W / rect.width;
+    const canvasTouchX = touchX * scale;
+    const minX = ROAD_MARGIN + CAR_W / 2 + 2;
+    const maxX = CANVAS_W - ROAD_MARGIN - CAR_W / 2 - 2;
+    playerTargetXRef.current = Math.max(minX, Math.min(maxX, canvasTouchX));
+  }
+
+  const levelDisplay = Math.floor(score / 5) + 1;
+
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-between py-8 px-4 font-mono">
-      <header className="text-center mb-6">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-between py-6 px-4 font-mono">
+      <header className="text-center mb-4">
         <h1
-          className="text-3xl md:text-4xl font-display font-bold tracking-widest uppercase"
+          className="text-4xl md:text-5xl font-display font-black tracking-widest uppercase"
           style={{
-            color: "oklch(var(--snake-head))",
-            textShadow: "0 0 20px oklch(var(--snake-head) / 0.5)",
+            color: "oklch(var(--race-cyan))",
+            textShadow:
+              "0 0 30px oklch(var(--race-cyan) / 0.7), 0 0 60px oklch(var(--race-cyan) / 0.3)",
           }}
         >
-          SNAKE
+          SPEED RUSH
         </h1>
-        <p className="text-muted-foreground text-xs tracking-[0.3em] mt-1">
-          TERMINAL v2.6
+        <p className="text-muted-foreground text-xs tracking-[0.35em] mt-1 uppercase">
+          Neon Racer
         </p>
       </header>
 
       <div
         data-ocid="score.panel"
-        className="flex gap-8 md:gap-16 mb-6 px-8 py-3 rounded-sm border border-border bg-card"
+        className="flex gap-6 md:gap-12 mb-4 px-6 py-3 rounded-sm border border-border bg-card"
       >
         <div className="text-center">
           <div className="text-xs text-muted-foreground tracking-widest mb-1">
             SCORE
           </div>
           <div
-            key={scoreKey}
-            className="text-2xl font-bold score-tick"
+            className="text-2xl font-bold tabular-nums"
             style={{
-              color: "oklch(var(--snake-head))",
-              textShadow: "0 0 12px oklch(var(--snake-head) / 0.6)",
+              color: "oklch(var(--race-cyan))",
+              textShadow: "0 0 12px oklch(var(--race-cyan) / 0.5)",
             }}
           >
             {String(score).padStart(4, "0")}
@@ -269,7 +456,7 @@ export default function App() {
             BEST
           </div>
           <div
-            className="text-2xl font-bold"
+            className="text-2xl font-bold tabular-nums"
             style={{ color: "oklch(var(--muted-foreground))" }}
           >
             {String(highScore).padStart(4, "0")}
@@ -278,166 +465,140 @@ export default function App() {
         <div className="w-px bg-border" />
         <div className="text-center">
           <div className="text-xs text-muted-foreground tracking-widest mb-1">
-            SPEED
+            LEVEL
           </div>
           <div
-            className="text-2xl font-bold"
-            style={{ color: "oklch(var(--accent))" }}
+            className="text-2xl font-bold tabular-nums"
+            style={{
+              color: "oklch(var(--race-orange))",
+              textShadow: "0 0 10px oklch(var(--race-orange) / 0.5)",
+            }}
           >
-            {speedLabel(score)}
+            {String(levelDisplay).padStart(2, "0")}
           </div>
         </div>
       </div>
 
-      <main className="relative">
-        <div className="p-3 md:p-5 rounded-md bg-secondary shadow-screen">
-          <div
-            data-ocid="game.canvas_target"
-            className="relative scanlines crt-flicker overflow-hidden rounded-sm"
-            style={{
-              width: boardSize,
-              height: boardSize,
-              backgroundColor: "oklch(var(--grid-bg))",
-              boxShadow: "inset 0 0 40px oklch(0.78 0.18 145 / 0.04)",
-            }}
-          >
-            {/* Grid lines */}
-            <svg
-              aria-hidden="true"
-              className="absolute inset-0 opacity-20"
-              width={boardSize}
-              height={boardSize}
-              style={{ pointerEvents: "none" }}
-            >
-              {gridIndices.map((i) => (
-                <g key={i}>
-                  <line
-                    x1={i * CELL}
-                    y1={0}
-                    x2={i * CELL}
-                    y2={boardSize}
-                    stroke="oklch(0.4 0.02 200)"
-                    strokeWidth="0.5"
-                  />
-                  <line
-                    x1={0}
-                    y1={i * CELL}
-                    x2={boardSize}
-                    y2={i * CELL}
-                    stroke="oklch(0.4 0.02 200)"
-                    strokeWidth="0.5"
-                  />
-                </g>
-              ))}
-            </svg>
+      <main className="relative flex-shrink-0">
+        <div
+          className="p-2 rounded-lg bg-secondary"
+          style={{
+            boxShadow:
+              "0 0 0 2px oklch(var(--border)), 0 0 0 5px oklch(var(--secondary)), 0 24px 64px oklch(0 0 0 / 0.75)",
+          }}
+        >
+          <div className="relative overflow-hidden rounded-sm">
+            <canvas
+              ref={canvasRef}
+              data-ocid="game.canvas_target"
+              width={CANVAS_W}
+              height={CANVAS_H}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              style={{
+                display: "block",
+                touchAction: "none",
+                maxWidth: "min(360px, calc(100vw - 32px))",
+                height: "auto",
+              }}
+            />
 
-            {/* Cells */}
-            {cells.map(({ key, col, row, snakeIdx, isFood }) => {
-              const isHead = snakeIdx === 0;
-              return (
-                <div
-                  key={key}
-                  className={isFood ? "food-pulse" : isHead ? "head-glow" : ""}
-                  style={{
-                    position: "absolute",
-                    left: col * CELL + 1,
-                    top: row * CELL + 1,
-                    width: CELL - 2,
-                    height: CELL - 2,
-                    borderRadius: isHead ? 4 : isFood ? "50%" : 2,
-                    backgroundColor: isFood
-                      ? "oklch(var(--food-color))"
-                      : isHead
-                        ? "oklch(var(--snake-head))"
-                        : `oklch(${0.68 - (snakeIdx ?? 0) * 0.015} 0.17 148)`,
-                    transition: "background-color 0.1s",
-                  }}
-                />
-              );
-            })}
-
-            {/* Idle overlay */}
             <AnimatePresence>
-              {status === "idle" && (
+              {gameStatus === "idle" && (
                 <motion.div
                   key="idle"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
+                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
                   className="absolute inset-0 flex flex-col items-center justify-center"
-                  style={{ backgroundColor: "oklch(0.10 0.012 240 / 0.88)" }}
+                  style={{ backgroundColor: "rgba(8,8,16,0.80)" }}
                 >
-                  <motion.div
-                    animate={{ opacity: [1, 0.4, 1] }}
+                  <motion.p
+                    animate={{ opacity: [1, 0.25, 1] }}
                     transition={{
-                      duration: 1.2,
+                      duration: 1.4,
                       repeat: Number.POSITIVE_INFINITY,
+                      ease: "easeInOut",
                     }}
-                    className="text-sm md:text-base tracking-widest text-center px-4"
+                    className="text-sm tracking-widest text-center px-6"
                     style={{
-                      color: "oklch(var(--snake-head))",
-                      textShadow: "0 0 12px oklch(var(--snake-head) / 0.6)",
+                      color: "oklch(var(--race-cyan))",
+                      textShadow: "0 0 14px oklch(var(--race-cyan) / 0.7)",
                     }}
                   >
-                    PRESS ARROW KEY TO START
-                  </motion.div>
-                  <div className="mt-4 text-xs text-muted-foreground tracking-wider">
-                    USE ↑ ↓ ← → TO MOVE
-                  </div>
+                    PRESS ARROW OR TAP TO START
+                  </motion.p>
+                  <p className="mt-3 text-xs tracking-wider text-muted-foreground">
+                    ← → TO STEER
+                  </p>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* Game Over overlay */}
             <AnimatePresence>
-              {status === "over" && (
+              {gameStatus === "over" && (
                 <motion.div
                   key="gameover"
-                  initial={{ opacity: 0, scale: 0.95 }}
+                  initial={{ opacity: 0, scale: 0.94 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.25 }}
+                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
+                  transition={{ duration: 0.25, ease: "easeOut" }}
                   className="absolute inset-0 flex flex-col items-center justify-center gap-4"
-                  style={{ backgroundColor: "oklch(0.08 0.012 240 / 0.92)" }}
+                  style={{ backgroundColor: "rgba(6,6,12,0.93)" }}
                 >
                   <motion.div
-                    initial={{ y: -10 }}
+                    initial={{ y: -12 }}
                     animate={{ y: 0 }}
-                    className="text-xl md:text-2xl font-bold tracking-widest"
+                    transition={{ type: "spring", stiffness: 300, damping: 20 }}
+                    className="text-2xl font-black tracking-widest uppercase"
                     style={{
-                      color: "oklch(var(--destructive))",
-                      textShadow: "0 0 16px oklch(var(--destructive) / 0.6)",
+                      color: "oklch(var(--race-red))",
+                      textShadow:
+                        "0 0 24px oklch(var(--race-red) / 0.8), 0 0 48px oklch(var(--race-red) / 0.4)",
                     }}
                   >
                     GAME OVER
                   </motion.div>
-                  <div className="text-xs text-muted-foreground tracking-widest">
+
+                  <div
+                    className="text-sm tracking-widest"
+                    style={{ color: "oklch(var(--muted-foreground))" }}
+                  >
                     SCORE:{" "}
-                    <span style={{ color: "oklch(var(--snake-head))" }}>
+                    <span
+                      style={{
+                        color: "oklch(var(--race-cyan))",
+                        textShadow: "0 0 8px oklch(var(--race-cyan) / 0.6)",
+                      }}
+                    >
                       {String(score).padStart(4, "0")}
                     </span>
                   </div>
-                  {score >= highScore && score > 0 && (
+
+                  {score > 0 && score >= highScore && (
                     <motion.div
-                      animate={{ opacity: [1, 0.5, 1] }}
-                      transition={{ duration: 0.8, repeat: 3 }}
+                      animate={{ opacity: [1, 0.35, 1] }}
+                      transition={{ duration: 0.7, repeat: 4 }}
                       className="text-xs tracking-widest"
-                      style={{ color: "oklch(var(--accent))" }}
+                      style={{
+                        color: "oklch(var(--race-orange))",
+                        textShadow: "0 0 8px oklch(var(--race-orange) / 0.6)",
+                      }}
                     >
                       ★ NEW HIGH SCORE ★
                     </motion.div>
                   )}
+
                   <button
                     type="button"
                     data-ocid="game.restart_button"
-                    onClick={restart}
-                    className="mt-2 px-6 py-2 text-sm tracking-widest font-bold rounded-sm border transition-all duration-150 hover:scale-105 active:scale-95"
+                    onClick={startGame}
+                    className="mt-1 px-8 py-2.5 text-sm tracking-widest font-bold rounded-sm border transition-all duration-150 hover:scale-105 active:scale-95"
                     style={{
-                      backgroundColor: "oklch(var(--primary) / 0.15)",
-                      borderColor: "oklch(var(--primary) / 0.6)",
-                      color: "oklch(var(--snake-head))",
-                      textShadow: "0 0 8px oklch(var(--snake-head) / 0.5)",
-                      boxShadow: "0 0 12px oklch(var(--primary) / 0.2)",
+                      backgroundColor: "rgba(0,212,255,0.08)",
+                      borderColor: "oklch(var(--race-cyan) / 0.55)",
+                      color: "oklch(var(--race-cyan))",
+                      boxShadow: "0 0 20px oklch(var(--race-cyan) / 0.18)",
                     }}
                   >
                     PLAY AGAIN
@@ -449,34 +610,17 @@ export default function App() {
         </div>
       </main>
 
-      {/* Mobile controls */}
-      <div className="mt-6 flex flex-col items-center gap-2 md:hidden">
-        <MobileBtn dir="UP" label="▲" onClick={() => handleMobileDir("UP")} />
-        <div className="flex gap-2">
-          <MobileBtn
-            dir="LEFT"
-            label="◄"
-            onClick={() => handleMobileDir("LEFT")}
-          />
-          <div className="w-12 h-12" />
-          <MobileBtn
-            dir="RIGHT"
-            label="►"
-            onClick={() => handleMobileDir("RIGHT")}
-          />
-        </div>
-        <MobileBtn
-          dir="DOWN"
-          label="▼"
-          onClick={() => handleMobileDir("DOWN")}
-        />
-      </div>
+      <p className="mt-4 text-xs text-muted-foreground tracking-wider md:hidden">
+        DRAG LEFT / RIGHT TO STEER
+      </p>
 
-      <footer className="mt-8 text-center text-xs text-muted-foreground">
+      <footer className="mt-6 text-center text-xs text-muted-foreground">
         <p>
           © {new Date().getFullYear()}.{" "}
           <a
-            href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(typeof window !== "undefined" ? window.location.hostname : "")}`}
+            href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(
+              typeof window !== "undefined" ? window.location.hostname : "",
+            )}`}
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-foreground transition-colors"
@@ -486,36 +630,5 @@ export default function App() {
         </p>
       </footer>
     </div>
-  );
-}
-
-// ── Mobile button ──────────────────────────────────────────────────────────
-function MobileBtn({
-  label,
-  onClick,
-}: { dir: Direction; label: string; onClick: () => void }) {
-  const [pressing, setPressing] = useState(false);
-
-  function handlePress() {
-    setPressing(true);
-    setTimeout(() => setPressing(false), 150);
-    onClick();
-  }
-
-  return (
-    <button
-      type="button"
-      onPointerDown={handlePress}
-      className={`w-12 h-12 rounded-sm border text-lg font-bold flex items-center justify-center select-none transition-colors ${
-        pressing ? "btn-press" : ""
-      }`}
-      style={{
-        backgroundColor: "oklch(var(--secondary))",
-        borderColor: "oklch(var(--border))",
-        color: "oklch(var(--snake-head))",
-      }}
-    >
-      {label}
-    </button>
   );
 }

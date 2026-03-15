@@ -70,13 +70,11 @@ export default {
           border: "oklch(var(--sidebar-border))",
           ring: "oklch(var(--sidebar-ring))",
         },
-        snake: {
-          head: "oklch(var(--snake-head))",
-          body: "oklch(var(--snake-body))",
+        race: {
+          cyan: "oklch(var(--race-cyan))",
+          orange: "oklch(var(--race-orange))",
+          red: "oklch(var(--race-red))",
         },
-        food: "oklch(var(--food-color))",
-        "grid-bg": "oklch(var(--grid-bg))",
-        "grid-line": "oklch(var(--grid-line))",
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -85,8 +83,8 @@ export default {
       },
       boxShadow: {
         xs: "0 1px 2px 0 rgba(0,0,0,0.05)",
-        "crt": "inset 0 0 60px oklch(0.78 0.18 145 / 0.05), 0 0 40px oklch(0 0 0 / 0.8)",
-        "screen": "0 0 0 3px oklch(0.25 0.02 240), 0 0 0 6px oklch(0.18 0.015 240), 0 20px 60px oklch(0 0 0 / 0.7)",
+        screen:
+          "0 0 0 3px oklch(0.22 0.015 260), 0 0 0 6px oklch(0.16 0.012 260), 0 24px 64px oklch(0 0 0 / 0.75)",
       },
       keyframes: {
         "accordion-down": {
